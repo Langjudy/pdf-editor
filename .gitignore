@@ -1,0 +1,14 @@
+# 运行环境
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 文档与样例文件（不随仓库提供）
+*.pdf
+*.pdfproj
+
+# 临时文件
+.~*.tmp
+*.tmp

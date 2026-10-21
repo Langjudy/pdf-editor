@@ -1,0 +1,7 @@
+# 阶段一
+PySide6
+PyMuPDF
+pytest
+# 阶段三：扫描件（图像处理、OCR）
+opencv-python-headless
+rapidocr-onnxruntime
