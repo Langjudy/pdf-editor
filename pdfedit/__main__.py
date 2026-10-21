@@ -12,7 +12,8 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
-    app.setFont(QFont("Microsoft YaHei UI", 9))
+    if sys.platform == "win32":          # 其他平台使用系统默认界面字体
+        app.setFont(QFont("Microsoft YaHei UI", 9))
     win = MainWindow()
     win.show()
     files = [a for a in sys.argv[1:] if os.path.isfile(a)]

@@ -34,6 +34,8 @@ class SaveOptions:
     paper: str | None = None          # None=保持原尺寸，否则统一缩放到该纸张
     user_pw: str = ""                 # 打开密码
     owner_pw: str = ""                # 权限密码
+    flatten_annots: bool = False      # 批注拼合到页面（F-ANN-08）
+    scrub: bool = False               # 清理元数据与隐藏信息（涂黑后建议开启，7.5）
 
 
 @dataclass
@@ -75,6 +77,11 @@ def build_document(store: DocumentStore, items: list[PageItem], opts: SaveOption
         _apply_toc(store, items, out)
         if opts.paper:
             out = _fit_to_paper(out, opts.paper)
+        if opts.flatten_annots:
+            out.bake(annots=True, widgets=False)
+        if opts.scrub:
+            from .annots import scrub_private
+            scrub_private(out)
     return out
 
 

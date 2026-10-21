@@ -73,7 +73,7 @@ def run_task(parent, title: str, fn, *args, cancellable: bool = True):
 # ================================================================ 导出
 class ExportDialog(QDialog):
     def __init__(self, parent, has_selection: bool, total: int, selected: int, default_dir: str,
-                 default_name: str):
+                 default_name: str, has_redactions: bool = False):
         super().__init__(parent)
         self.setWindowTitle("导出")
         self.default_dir = default_dir
@@ -154,6 +154,16 @@ class ExportDialog(QDialog):
         pl.addRow("页面尺寸", self.paper)
         pl.addRow("打开密码", self.user_pw)
         pl.addRow("权限密码", self.owner_pw)
+        self.annots = QComboBox()
+        self.annots.addItem("保留为可编辑批注", False)
+        self.annots.addItem("拼合到页面（不可再编辑）", True)
+        from PySide6.QtWidgets import QCheckBox
+        self.scrub = QCheckBox("清理隐私信息（元数据、脚本、缩略图、附件等）")
+        self.scrub.setChecked(has_redactions)
+        if has_redactions:
+            self.scrub.setToolTip("所选页面做过涂黑，建议清理，避免元数据中残留敏感信息")
+        pl.addRow("批注", self.annots)
+        pl.addRow(self.scrub)
         lay.addWidget(self.pdf_box)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -193,7 +203,8 @@ class ExportDialog(QDialog):
 
     def save_options(self) -> SaveOptions:
         return SaveOptions(compression=self.compress.currentData(), paper=self.paper.currentData(),
-                           user_pw=self.user_pw.text(), owner_pw=self.owner_pw.text())
+                           user_pw=self.user_pw.text(), owner_pw=self.owner_pw.text(),
+                           flatten_annots=bool(self.annots.currentData()), scrub=self.scrub.isChecked())
 
     def _accept(self):
         m = self.mode()
@@ -241,12 +252,20 @@ def show_export_done(parent, files: list[str], skipped: list[str], folder: str):
 
 
 def open_folder(path: str):
+    """在系统文件管理器中打开（文件则定位选中）。"""
     import subprocess
+    import sys
     path = os.path.normpath(path)
-    if os.path.isfile(path):
-        subprocess.Popen(["explorer", "/select,", path])
+    is_file = os.path.isfile(path)
+    if sys.platform == "win32":
+        if is_file:
+            subprocess.Popen(["explorer", "/select,", path])
+        else:
+            os.startfile(path)  # noqa: S606
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", path] if is_file else ["open", path])
     else:
-        os.startfile(path)  # noqa: S606
+        subprocess.Popen(["xdg-open", os.path.dirname(path) if is_file else path])
 
 
 

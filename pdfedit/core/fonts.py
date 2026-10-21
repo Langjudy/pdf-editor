@@ -11,20 +11,34 @@ import json
 import os
 import re
 import struct
+import sys
 from dataclasses import asdict, dataclass
 
 import pymupdf as fitz
 
 from .engine import ENGINE_LOCK
 
-FONT_DIRS = [
-    os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
-    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts"),
-]
+def _font_dirs() -> list[str]:
+    """各平台的系统 / 用户字体目录。"""
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        return [os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
+                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")]
+    if sys.platform == "darwin":
+        return ["/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts",
+                os.path.join(home, "Library", "Fonts")]
+    return ["/usr/share/fonts", "/usr/local/share/fonts", os.path.join(home, ".fonts"),
+            os.path.join(home, ".local", "share", "fonts")]
+
+
+FONT_DIRS = _font_dirs()
 FONT_EXTS = (".ttf", ".ttc", ".otf")
 
-# 默认中文字体候选（按优先级）
-DEFAULT_CJK = ["SimSun", "Microsoft YaHei", "SimHei", "DengXian", "KaiTi", "FangSong"]
+# 默认中文字体候选（按优先级；不同平台取各自存在的那个）
+DEFAULT_CJK = ["SimSun", "Microsoft YaHei", "SimHei", "DengXian", "KaiTi", "FangSong",
+               "Songti SC", "PingFang SC", "STSong", "Heiti SC",                     # macOS
+               "Noto Serif CJK SC", "Noto Sans CJK SC", "Source Han Serif SC",      # Linux
+               "Source Han Sans SC", "WenQuanYi Zen Hei", "WenQuanYi Micro Hei", "AR PL UMing CN"]
 
 # PDF 中常见字体名 → 系统字体族名
 ALIASES = {
@@ -136,12 +150,17 @@ class FontManager:
             return
         self._loaded = True
         files = []
+        seen = set()
         for d in FONT_DIRS:
-            if os.path.isdir(d):
-                for fn in os.listdir(d):
+            if not os.path.isdir(d):
+                continue
+            for root, _dirs, names in os.walk(d):          # Linux / macOS 字体在子目录中
+                for fn in names:
                     if fn.lower().endswith(FONT_EXTS):
-                        p = os.path.join(d, fn)
-                        files.append((p, os.path.getmtime(p)))
+                        p = os.path.join(root, fn)
+                        if p not in seen:
+                            seen.add(p)
+                            files.append((p, os.path.getmtime(p)))
         sig = sorted(f"{os.path.basename(p)}:{int(m)}" for p, m in files)
         cached = self._read_cache(sig)
         if cached is not None:

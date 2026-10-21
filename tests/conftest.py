@@ -33,3 +33,9 @@ def page_tags(path):
     """返回导出文件每页的标记文字，如 ['A-1', 'B-2']。"""
     with fitz.open(path) as d:
         return [p.get_text().strip().split("\n")[0] for p in d]
+
+
+# 以下测试直接使用 Windows 系统字体文件（宋体、黑体、仿宋、楷体），其他平台跳过
+if sys.platform != "win32":
+    collect_ignore = ["test_textedit.py", "test_textservice.py", "test_scan.py",
+                      "test_scanservice.py", "test_annots.py"]

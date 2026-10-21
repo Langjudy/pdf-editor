@@ -11,7 +11,7 @@ import math
 from collections import OrderedDict
 
 import pymupdf as fitz
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QImage, QPainter, QPainterPath,
                            QPen, QPolygonF)
 from PySide6.QtWidgets import QAbstractScrollArea
@@ -20,6 +20,7 @@ from ..app.regions import Region, RegionStore
 from ..app.workspace import Workspace
 from ..core.engine import DocumentStore
 from .render_service import RenderService
+from .annotlayer import ANNOT_TOOLS, AnnotToolMixin
 from .textlayer import TEXT_TOOLS, TextToolMixin
 
 PT_TO_PX = 96.0 / 72.0
@@ -30,10 +31,10 @@ PREVIEW_LONG_SIDE = 1600       # 预览图长边（设备像素）
 MAX_TILES = 260
 MAX_PREVIEWS = 40
 
-TOOLS = ("hand", "rect", "poly", "free") + TEXT_TOOLS
+TOOLS = ("hand", "rect", "poly", "free") + TEXT_TOOLS + ANNOT_TOOLS
 
 
-class PageView(QAbstractScrollArea, TextToolMixin):
+class PageView(QAbstractScrollArea, TextToolMixin, AnnotToolMixin):
     currentChanged = Signal(int)
     zoomChanged = Signal(float)
     regionDrawn = Signal(int, list, bool)      # uid, 原始坐标顶点, 是否矩形
@@ -47,6 +48,17 @@ class PageView(QAbstractScrollArea, TextToolMixin):
     textBlockMoved = Signal(int, int, float, float)
     textDeleteRequested = Signal(int, int)
     outlineClicked = Signal(int)
+    # 批注
+    annotMarkup = Signal(int, str, list, str)          # uid, 类型, 四边形, 选中文字
+    annotNoteRequested = Signal(int, object)           # uid, 单击点
+    annotStampRequested = Signal(int, object)
+    annotFreeTextRequested = Signal(int, object)       # uid, 矩形 (x0, y0, x1, y1)
+    annotShape = Signal(int, str, list)                # uid, 图形, 顶点
+    annotInk = Signal(int, list, float)                # uid, 笔画, 平均压感（无压感为 -1）
+    annotSelected = Signal(int, str)
+    annotMoved = Signal(int, str, float, float)
+    annotDeleteRequested = Signal(int, str)
+    annotEditRequested = Signal(int, str)
 
     GAP = 16
 
@@ -74,6 +86,7 @@ class PageView(QAbstractScrollArea, TextToolMixin):
         self._edit: dict | None = None      # 正在调整的选区
         self._last_preview: OrderedDict = OrderedDict()   # uid -> 最近显示的预览（页面换版本时避免闪白）
         self._text_init()
+        self._annot_init()
 
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -377,10 +390,12 @@ class PageView(QAbstractScrollArea, TextToolMixin):
                 jobs += self._paint_tiles(p, ref, r, vr, vis, ds, dpr)
             self._paint_overlays(p, i, ref)
             self._paint_text_layer(p, i, ref)
+            self._paint_annot_layer(p, i, ref)
         self.service.set_tile_jobs(jobs)
         if self._editor is not None:
             self._place_editor()
         self._paint_drawing(p)
+        self._paint_annot_drawing(p)
 
     def _paint_tiles(self, p: QPainter, ref, r: QRectF, vr: QRectF, vis: QRectF, ds: float, dpr: float):
         jobs = []
@@ -526,6 +541,9 @@ class PageView(QAbstractScrollArea, TextToolMixin):
             self.set_selected_block(-1, -1)
         self.tool = tool
         self._draw = None
+        self._adraw = None
+        if tool != "a_annot":
+            self.sel_annot = None
         self._update_cursor()
         self.viewport().update()
 
@@ -544,6 +562,10 @@ class PageView(QAbstractScrollArea, TextToolMixin):
                 return
         if self.tool in TEXT_TOOLS:
             self.viewport().setCursor(Qt.IBeamCursor if self.tool == "addtext" else Qt.ArrowCursor)
+            return
+        if self.tool in ANNOT_TOOLS:
+            self.viewport().setCursor(Qt.IBeamCursor if self.tool in ("a_hl", "a_ul", "a_so", "a_sq") else
+                                      Qt.ArrowCursor if self.tool == "a_annot" else Qt.CrossCursor)
             return
         self.viewport().setCursor(Qt.OpenHandCursor if self.tool == "hand" else Qt.CrossCursor)
 
@@ -573,7 +595,7 @@ class PageView(QAbstractScrollArea, TextToolMixin):
             return
         if e.button() != Qt.LeftButton:
             return
-        if self._text_press(e):
+        if self._text_press(e) or self._annot_press(e):
             return
         c = self._to_content(vp)
         page = self._page_at(c)
@@ -629,7 +651,7 @@ class PageView(QAbstractScrollArea, TextToolMixin):
         if self._edit:
             self._apply_edit(vp)
             return
-        if self._text_move(e):
+        if self._text_move(e) or self._annot_move(e):
             return
         d = self._draw
         if d:
@@ -657,7 +679,7 @@ class PageView(QAbstractScrollArea, TextToolMixin):
         if self._edit:
             self._edit = None
             return
-        if self._text_release(e):
+        if self._text_release(e) or self._annot_release(e):
             return
         d = self._draw
         if not d or e.button() != Qt.LeftButton:
@@ -678,7 +700,7 @@ class PageView(QAbstractScrollArea, TextToolMixin):
             self.viewport().update()
 
     def mouseDoubleClickEvent(self, e):
-        if self._text_double(e):
+        if self._text_double(e) or self._annot_double(e):
             return
         if self.tool == "poly" and self._draw:
             self._finish_polygon()
@@ -736,7 +758,7 @@ class PageView(QAbstractScrollArea, TextToolMixin):
             self._space = True
             self._update_cursor()
             return
-        if self._text_key(e):
+        if self._text_key(e) or self._annot_key(e):
             return
         if self._draw and k == Qt.Key_Escape:
             self._draw = None
@@ -760,6 +782,23 @@ class PageView(QAbstractScrollArea, TextToolMixin):
             self.goto(len(self.refs()) - 1)
         else:
             super().keyPressEvent(e)
+
+    def viewportEvent(self, e):
+        if self._annot_tablet(e):
+            return False
+        return super().viewportEvent(e)
+
+    def event(self, e):
+        # 选中了文字块 / 批注、或正在绘制时，Delete、Esc、回车等由视图自己处理，
+        # 不触发窗口级快捷键（否则 Delete 会删除整页）
+        if e.type() == QEvent.ShortcutOverride and e.key() in (
+                Qt.Key_Delete, Qt.Key_Backspace, Qt.Key_Escape, Qt.Key_Return, Qt.Key_Enter):
+            busy = (self.sel_block is not None or self.sel_annot is not None or self._draw is not None
+                    or self._adraw is not None or self.selected_region is not None)
+            if busy:
+                e.accept()
+                return True
+        return super().event(e)
 
     def keyReleaseEvent(self, e):
         if e.key() == Qt.Key_Space and not e.isAutoRepeat():

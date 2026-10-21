@@ -149,6 +149,8 @@ class TextService:
             self.store.gen.page_types[pno] = self.store.get(ref.src).page_type(ref.pno)
             if self.store.has_ocr(ref.src, ref.pno):
                 self.store.gen_ocr.add(pno)
+            if ref.src == GEN_SOURCE_ID and ref.pno in self.store.gen_redacted:
+                self.store.gen_redacted.add(pno)
             return pno, self.store.gen.doc[pno]
 
     def _ref(self, uid: int) -> tuple[int, PageRef]:

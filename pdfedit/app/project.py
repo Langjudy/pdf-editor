@@ -19,7 +19,15 @@ VERSION = 1
 
 
 def app_data_dir() -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    """程序数据目录：Windows %LOCALAPPDATA%，macOS ~/Library/Application Support，Linux ~/.local/share。"""
+    import sys
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or home
+    elif sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
     d = os.path.join(base, "PdfEdit")
     os.makedirs(d, exist_ok=True)
     return d
@@ -47,6 +55,7 @@ def save_project(path: str, store: DocumentStore, ws: Workspace, regions: Region
         "generated": base64.b64encode(gen_bytes).decode("ascii"),
         "gen_origins": {str(k): list(v) for k, v in store.gen_origins.items()},
         "gen_ocr": sorted(store.gen_ocr),
+        "gen_redacted": sorted(store.gen_redacted),
         "refs": [[r.uid, r.src, r.pno, r.rot, r.kind] for r in ws.refs],
         "regions": regions.to_json(),
     }
@@ -80,7 +89,7 @@ def load_project(path: str, store: DocumentStore, ws: Workspace, regions: Region
         src.type_overrides = {int(k): v for k, v in (s.get("overrides") or {}).items()}
         ok_sources.add(src.id)
     store.load_generated(base64.b64decode(data.get("generated") or ""), data.get("gen_origins") or {},
-                         data.get("gen_ocr") or [])
+                         data.get("gen_ocr") or [], data.get("gen_redacted") or [])
     refs = []
     for uid, sid, pno, rot, kind in data["refs"]:
         if sid in ok_sources and pno < store.get(sid).page_count:

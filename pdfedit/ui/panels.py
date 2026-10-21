@@ -4,8 +4,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox,
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QPushButton, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..app.regions import Region, RegionStore
 from ..core.engine import ENGINE_LOCK, GEN_SOURCE_ID, DocumentStore
@@ -317,6 +317,242 @@ class TextPanel(QWidget):
             self.result.setStyleSheet("color:#188038")
 
 
+# ================================================================ 批注
+class AnnotPanel(QWidget):
+    """批注工具、样式、选中批注属性、批注列表（技术要求第 9 节）。"""
+    toolRequested = Signal(str)
+    applyRequested = Signal()             # 把面板样式 / 内容应用到选中批注
+    deleteRequested = Signal()
+    jumpRequested = Signal(int, str)      # uid, 批注 id
+    refreshRequested = Signal()
+    exportSummaryRequested = Signal()
+
+    TOOLS = [("a_hl", "高亮"), ("a_ul", "下划线"), ("a_so", "删除线"), ("a_sq", "波浪线"),
+             ("a_note", "便签"), ("a_freetext", "文本框"), ("a_rect", "矩形"), ("a_ellipse", "椭圆"),
+             ("a_line", "直线"), ("a_arrow", "箭头"), ("a_polygon", "多边形"), ("a_cloud", "云线"),
+             ("a_ink", "画笔"), ("a_stamp", "图章"), ("a_annot", "选择批注"), ("hand", "浏览")]
+    DEFAULT_COLORS = {"a_hl": (1.0, 0.85, 0.0), "a_ul": (0.0, 0.45, 0.9), "a_so": (0.85, 0.1, 0.1),
+                      "a_sq": (0.0, 0.6, 0.2)}
+
+    def __init__(self, author: str = "", parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QGridLayout, QSlider
+        lay = QVBoxLayout(self)
+        grid = QGridLayout()
+        self.tool_buttons = {}
+        for k, (key, label) in enumerate(self.TOOLS):
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _=False, t=key: self._pick_tool(t))
+            grid.addWidget(b, k // 4, k % 4)
+            self.tool_buttons[key] = b
+        lay.addLayout(grid)
+        tip = QLabel("文字标记：按住拖过文字；矩形 / 椭圆 / 直线 / 箭头 / 文本框：拖拽；"
+                     "多边形 / 云线：逐点单击、双击闭合；便签 / 图章：单击放置；"
+                     "选择批注：单击选中，可拖动，Delete 删除，双击改内容。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#5f6368")
+        lay.addWidget(tip)
+
+        box = QGroupBox("样式")
+        f = QFormLayout(box)
+        self.color = (1.0, 0.85, 0.0)
+        self.color_btn = QPushButton()
+        self.color_btn.clicked.connect(lambda: self._pick("color"))
+        self.fill_on = QCheckBox("填充")
+        self.fill = (1.0, 1.0, 0.8)
+        self.fill_btn = QPushButton()
+        self.fill_btn.clicked.connect(lambda: self._pick("fill"))
+        fr = QHBoxLayout()
+        fr.addWidget(self.fill_on)
+        fr.addWidget(self.fill_btn, 1)
+        fw = QWidget()
+        fw.setLayout(fr)
+        fr.setContentsMargins(0, 0, 0, 0)
+        self.opacity = QSlider(Qt.Horizontal, minimum=10, maximum=100, value=100)
+        self.opacity_lbl = QLabel("100%")
+        self.opacity.valueChanged.connect(lambda v: self.opacity_lbl.setText(f"{v}%"))
+        orow = QHBoxLayout()
+        orow.addWidget(self.opacity, 1)
+        orow.addWidget(self.opacity_lbl)
+        ow = QWidget()
+        ow.setLayout(orow)
+        orow.setContentsMargins(0, 0, 0, 0)
+        self.width = QDoubleSpinBox(decimals=1, minimum=0.5, maximum=20.0, value=1.5, suffix=" pt")
+        self.fontsize = QDoubleSpinBox(decimals=1, minimum=4.0, maximum=72.0, value=12.0, suffix=" pt")
+        self.author = QLineEdit(author)
+        f.addRow("颜色", self.color_btn)
+        f.addRow(fw)
+        f.addRow("透明度", ow)
+        f.addRow("线宽", self.width)
+        f.addRow("文本框字号", self.fontsize)
+        f.addRow("作者", self.author)
+        lay.addWidget(box)
+
+        sbox = QGroupBox("图章")
+        sf = QFormLayout(sbox)
+        self.stamp = QComboBox()
+        from ..core.annots import PRESET_STAMPS
+        for name in PRESET_STAMPS:
+            self.stamp.addItem(name, name)
+        self.stamp.addItem("自定义图片…", "__image__")
+        self.stamp_image = ""
+        self.stamp.activated.connect(self._stamp_changed)
+        self.stamp_width = QDoubleSpinBox(decimals=0, minimum=30, maximum=500, value=140, suffix=" pt")
+        sf.addRow("样式", self.stamp)
+        sf.addRow("宽度", self.stamp_width)
+        lay.addWidget(sbox)
+
+        cbox = QGroupBox("选中的批注")
+        cf = QVBoxLayout(cbox)
+        self.sel_info = QLabel("未选中（使用「选择批注」工具单击批注）")
+        self.sel_info.setWordWrap(True)
+        self.content = QPlainTextEdit()
+        self.content.setPlaceholderText("批注内容 / 说明")
+        self.content.setMaximumHeight(70)
+        br = QHBoxLayout()
+        b_apply = QPushButton("应用样式与内容")
+        b_apply.clicked.connect(self.applyRequested.emit)
+        b_del = QPushButton("删除批注")
+        b_del.clicked.connect(self.deleteRequested.emit)
+        br.addWidget(b_apply)
+        br.addWidget(b_del)
+        cf.addWidget(self.sel_info)
+        cf.addWidget(self.content)
+        cf.addLayout(br)
+        lay.addWidget(cbox)
+
+        lbox = QGroupBox("批注列表")
+        lf = QVBoxLayout(lbox)
+        flt = QHBoxLayout()
+        self.f_page = QComboBox()
+        self.f_page.addItems(["全部页面", "当前页"])
+        self.f_author = QComboBox()
+        self.f_type = QComboBox()
+        for w in (self.f_page, self.f_author, self.f_type):
+            w.activated.connect(lambda _=0: self.refreshRequested.emit())
+            flt.addWidget(w)
+        lf.addLayout(flt)
+        self.list = QListWidget()
+        self.list.itemActivated.connect(self._jump)
+        self.list.itemClicked.connect(self._jump)
+        lf.addWidget(self.list, 1)
+        lb = QHBoxLayout()
+        b_ref = QPushButton("刷新")
+        b_ref.clicked.connect(self.refreshRequested.emit)
+        b_exp = QPushButton("导出批注摘要…")
+        b_exp.clicked.connect(self.exportSummaryRequested.emit)
+        lb.addWidget(b_ref)
+        lb.addWidget(b_exp)
+        lf.addLayout(lb)
+        lay.addWidget(lbox, 1)
+        self._update_btns()
+        self._rows = []
+
+    # ---------- 工具与样式 ----------
+    def _pick_tool(self, t):
+        self.toolRequested.emit(t)
+
+    def apply_tool_default(self, t):
+        """切换工具时的默认颜色：文字标记用各自的标准色，图形类从标记色切回红色。"""
+        if t in self.DEFAULT_COLORS:
+            self.color = self.DEFAULT_COLORS[t]
+            self._update_btns()
+        elif t in ("a_rect", "a_ellipse", "a_line", "a_arrow", "a_polygon", "a_cloud", "a_ink", "a_freetext") \
+                and self.color in self.DEFAULT_COLORS.values():
+            self.color = (0.85, 0.1, 0.1)
+            self._update_btns()
+
+    def set_tool_checked(self, tool):
+        for k, b in self.tool_buttons.items():
+            b.setChecked(k == tool)
+
+    def _pick(self, which):
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QColorDialog
+        cur = self.color if which == "color" else self.fill
+        c = QColorDialog.getColor(QColor.fromRgbF(*cur), self, "选择颜色")
+        if c.isValid():
+            v = (c.redF(), c.greenF(), c.blueF())
+            if which == "color":
+                self.color = v
+            else:
+                self.fill = v
+                self.fill_on.setChecked(True)
+            self._update_btns()
+
+    def _update_btns(self):
+        for btn, c in ((self.color_btn, self.color), (self.fill_btn, self.fill)):
+            r, g, b = (int(v * 255) for v in c)
+            btn.setStyleSheet(f"background: rgb({r},{g},{b}); min-height: 18px;")
+
+    def _stamp_changed(self, _i):
+        if self.stamp.currentData() == "__image__":
+            from PySide6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getOpenFileName(self, "选择图章图片", "", "图片 (*.png *.jpg *.jpeg *.bmp)")
+            if path:
+                self.stamp_image = path
+                self.stamp.setItemText(self.stamp.currentIndex(), "自定义：" + path.replace("\\", "/").split("/")[-1])
+            else:
+                self.stamp.setCurrentIndex(0)
+
+    def style(self):
+        from ..core.annots import Style
+        return Style(color=self.color, fill=self.fill if self.fill_on.isChecked() else None,
+                     opacity=self.opacity.value() / 100.0, width=self.width.value(),
+                     fontsize=self.fontsize.value(), author=self.author.text().strip())
+
+    # ---------- 选中批注 ----------
+    def show_selected(self, info, page_no: int | None = None):
+        if info is None:
+            self.sel_info.setText("未选中（使用「选择批注」工具单击批注）")
+            self.content.setPlainText("")
+            return
+        where = f"第 {page_no} 页 · " if page_no else ""
+        self.sel_info.setText(f"{where}{info.label} · 作者：{info.author or '—'}")
+        self.content.setPlainText(info.content)
+        if info.color:
+            self.color = tuple(info.color)
+        if info.fill:
+            self.fill = tuple(info.fill)
+        self.fill_on.setChecked(bool(info.fill))
+        self.opacity.setValue(int(round((info.opacity or 1) * 100)))
+        if info.width:
+            self.width.setValue(info.width)
+        self._update_btns()
+
+    # ---------- 列表 ----------
+    def set_rows(self, rows, authors, types):
+        """rows: [(工作区序号, PageRef, AnnotInfo)]（已筛选）。"""
+        def refill(combo, first, values):
+            cur = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(first)
+            combo.addItems(values)
+            i = combo.findText(cur)
+            combo.setCurrentIndex(max(0, i))
+            combo.blockSignals(False)
+        refill(self.f_author, "全部作者", authors)
+        refill(self.f_type, "全部类型", types)
+        self._rows = rows
+        self.list.clear()
+        for i, _ref, a in rows:
+            text = " ".join(a.content.split())[:40]
+            self.list.addItem(f"第 {i + 1} 页  {a.label}  {a.author or ''}" + (f"：{text}" if text else ""))
+
+    def filters(self):
+        return (self.f_page.currentIndex() == 1,
+                self.f_author.currentText() if self.f_author.currentIndex() > 0 else None,
+                self.f_type.currentText() if self.f_type.currentIndex() > 0 else None)
+
+    def _jump(self, item):
+        r = self.list.row(item)
+        if 0 <= r < len(self._rows):
+            _i, ref, a = self._rows[r]
+            self.jumpRequested.emit(ref.uid, a.id)
+
+
 # ================================================================ 区域
 class RegionPanel(QWidget):
     toolRequested = Signal(str)
@@ -325,6 +561,7 @@ class RegionPanel(QWidget):
     exportRequested = Signal(int, list, object)
     templateRequested = Signal(int, list)
     eraseRequested = Signal(int, list)
+    redactRequested = Signal(int, list)
 
     def __init__(self, regions: RegionStore, parent=None):
         super().__init__(parent)
@@ -407,6 +644,11 @@ class RegionPanel(QWidget):
         lay.addWidget(b_exp)
         lay.addWidget(b_tpl)
         lay.addWidget(b_erase)
+        b_red = QPushButton("涂黑选区（彻底删除内容）")
+        b_red.setStyleSheet("color:#c5221f")
+        b_red.setToolTip("删除选区内的文字、图片像素与图形并以黑块覆盖；导出时建议同时清理隐私信息")
+        b_red.clicked.connect(lambda: self.redactRequested.emit(self.uid, self.selected_ids()))
+        lay.addWidget(b_red)
         regions.listeners.append(self._on_regions_changed)
         self._update_geo_enabled()
 

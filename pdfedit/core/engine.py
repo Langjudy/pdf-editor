@@ -64,6 +64,7 @@ class DocumentStore:
         self.sources: dict[str, Source] = {}
         self.gen_origins: dict[int, tuple[str, int]] = {}   # 生成页号 → (来源 id, 来源页号)
         self.gen_ocr: set[int] = set()                       # 已有 OCR 文字层的生成页
+        self.gen_redacted: set[int] = set()                  # 做过涂黑的生成页（导出时清理隐私信息）
         self._counter = 0
         gen = fitz.open()
         self.sources[GEN_SOURCE_ID] = Source(GEN_SOURCE_ID, None, "生成页", "#888888", gen)
@@ -128,7 +129,7 @@ class DocumentStore:
     def has_ocr(self, sid: str, pno: int) -> bool:
         return sid == GEN_SOURCE_ID and pno in self.gen_ocr
 
-    def load_generated(self, data: bytes, origins: dict, ocr=()):
+    def load_generated(self, data: bytes, origins: dict, ocr=(), redacted=()):
         """从项目文件恢复生成页文档。"""
         with ENGINE_LOCK:
             gen = self.gen
@@ -137,6 +138,7 @@ class DocumentStore:
             gen.page_types = [None] * gen.doc.page_count
             self.gen_origins = {int(k): tuple(v) for k, v in origins.items()}
             self.gen_ocr = {int(x) for x in ocr}
+            self.gen_redacted = {int(x) for x in redacted}
 
     @property
     def gen(self) -> Source:

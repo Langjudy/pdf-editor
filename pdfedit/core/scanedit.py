@@ -22,7 +22,21 @@ from .scan import (PageImage, composite_rgba, erase_text, line_strokes, load_pag
 from .textedit import LineOut, TBlock, TextStyle, write_overlay
 
 # 字体风格候选：显示名 → 系统字体族名
-SCAN_FONTS = {"宋体": "SimSun", "黑体": "SimHei", "仿宋": "FangSong", "楷体": "KaiTi"}
+SCAN_FONTS = {   # 风格 → 各平台候选字体族名（取系统中第一个存在的）
+    "宋体": ["SimSun", "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", "AR PL UMing CN"],
+    "黑体": ["SimHei", "Heiti SC", "STHeiti", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC",
+           "WenQuanYi Zen Hei"],
+    "仿宋": ["FangSong", "STFangsong", "FangSong_GB2312"],
+    "楷体": ["KaiTi", "Kaiti SC", "STKaiti", "AR PL UKai CN"],
+}
+
+
+def scan_family(fm: FontManager, label: str) -> str:
+    """某种字体风格在本机可用的字体族名；都没有时返回第一个候选（将回退到内置中文字体）。"""
+    for name in SCAN_FONTS[label]:
+        if fm.find(name):
+            return name
+    return SCAN_FONTS[label][0]
 
 
 @dataclass
@@ -120,7 +134,8 @@ def estimate_style(pi: PageImage, rect: fitz.Rect, text: str, fm: FontManager) -
     sample = text.strip() or "字"
     best = None
     scores = {}
-    for label, family in SCAN_FONTS.items():
+    for label in SCAN_FONTS:
+        family = scan_family(fm, label)
         font, _ = _font(fm, family)
         # 先按 100pt 渲染测量墨迹高度比例，换算出字号
         ref, _o = render_text_rgba(sample, font, 100.0, (0, 0, 0), 1.0)

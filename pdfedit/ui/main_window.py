@@ -13,9 +13,11 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBo
 from ..app import project
 from ..app.exporter import ExportJob, origin_of, origin_source, run_export
 from ..app.regions import RegionStore
+from ..app.annotservice import AnnotService
 from ..app.scanservice import ScanService
 from ..app.textservice import EditLocked, TextService
 from ..app.workspace import PageRef, Workspace, parse_range
+from ..core import annots as A
 from ..core import pagetype
 from ..core.fonts import FontManager
 from ..core.engine import (ENGINE_LOCK, GEN_SOURCE_ID, IMAGE_EXTS, DocumentStore, ImportError_,
@@ -25,7 +27,7 @@ from ..core.writer import (ExportCancelled, RegionShape, SaveOptions, build_regi
 from .dialogs import (ExportDialog, OcrDialog, PreprocessDialog, ask_page_number, run_task,
                       show_export_done)
 from .ocr_worker import OcrWorker
-from .panels import BookmarkPanel, RegionPanel, SearchPanel, TextPanel
+from .panels import AnnotPanel, BookmarkPanel, RegionPanel, SearchPanel, TextPanel
 from .render_service import RenderService
 from .thumbs import THUMB_SIZES, ThumbModel, ThumbView
 from .viewer import PageView
@@ -55,6 +57,7 @@ class MainWindow(QMainWindow):
         self._build_widgets()
         self._setup_text()
         self._setup_scan()
+        self._setup_annots()
         self._build_actions()
         self._build_menus()
         self._build_toolbar()
@@ -114,6 +117,7 @@ class MainWindow(QMainWindow):
         self.region_panel.exportRequested.connect(self._export_regions)
         self.region_panel.templateRequested.connect(self._apply_region_template)
         self.region_panel.eraseRequested.connect(self._erase_regions)
+        self.region_panel.redactRequested.connect(self._redact_regions)
         self.search_panel = SearchPanel()
         self.search_panel.searchRequested.connect(self._search)
         self.search_panel.replaceRequested.connect(self._replace)
@@ -123,16 +127,51 @@ class MainWindow(QMainWindow):
         self.text_panel.applyStyleRequested.connect(self._apply_text_style)
         self.text_panel.deleteRequested.connect(self._delete_selected_text)
         self.text_panel.fontSettingsRequested.connect(self.font_settings)
+        self.annot_panel = AnnotPanel(self.settings.value("annot_author", "") or A.default_author())
+        self.annot_panel.toolRequested.connect(self.set_tool)
+        self.annot_panel.applyRequested.connect(self._apply_annot_style)
+        self.annot_panel.deleteRequested.connect(self._delete_selected_annot)
+        self.annot_panel.jumpRequested.connect(self._jump_annot)
+        self.annot_panel.refreshRequested.connect(self._refresh_annot_list)
+        self.annot_panel.exportSummaryRequested.connect(self._export_annot_summary)
+        self.annot_panel.author.editingFinished.connect(
+            lambda: self.settings.setValue("annot_author", self.annot_panel.author.text().strip()))
         right = QTabWidget()
-        right.addTab(self.text_panel, "文字")
-        right.addTab(self.region_panel, "区域选取")
+        right.addTab(self._scrollable(self.text_panel), "文字")
+        right.addTab(self._scrollable(self.annot_panel), "批注")
+        right.addTab(self._scrollable(self.region_panel), "区域选取")
         right.addTab(self.search_panel, "查找替换")
         self.right_tabs = right
+        right.currentChanged.connect(self._refresh_annot_list)
         self.right_dock = QDockWidget("工具", self)
         self.right_dock.setObjectName("tools")
         self.right_dock.setWidget(right)
         self.addDockWidget(Qt.RightDockWidgetArea, self.right_dock)
-        self.resizeDocks([self.right_dock], [300], Qt.Horizontal)
+        self.resizeDocks([self.right_dock], [380], Qt.Horizontal)
+
+    def _show_tab(self, panel):
+        for i in range(self.right_tabs.count()):
+            w = self.right_tabs.widget(i)
+            if w is panel or getattr(w, "widget", lambda: None)() is panel:
+                self.right_tabs.setCurrentIndex(i)
+                return
+
+    def _current_panel(self):
+        w = self.right_tabs.currentWidget()
+        inner = getattr(w, "widget", None)
+        return inner() if callable(inner) else w
+
+    @staticmethod
+    def _scrollable(panel):
+        """面板内容较多时可以滚动（小屏幕、高分屏缩放下不会被挤压）。"""
+        from PySide6.QtWidgets import QFrame, QScrollArea
+        sa = QScrollArea()
+        sa.setWidget(panel)
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # 只纵向滚动，宽度随停靠栏自适应
+        panel.setMinimumHeight(panel.sizeHint().height())
+        return sa
 
     def _act(self, text, slot, shortcut=None, tip=None, checkable=False):
         a = QAction(text, self)
@@ -269,6 +308,13 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_find_replace)
         m.addAction(self.a_font_settings)
 
+        m = mb.addMenu("批注(&A)")
+        for key, label in AnnotPanel.TOOLS[:-1]:
+            m.addAction(label, lambda k=key: self.set_tool(k))
+        m.addSeparator()
+        m.addAction("批注列表", lambda: (self.right_dock.show(), self._show_tab(self.annot_panel)))
+        m.addAction("导出批注摘要…", self._export_annot_summary)
+
         m = mb.addMenu("扫描(&S)")
         for a in (self.a_ocr, self.a_ocr_cancel, self.a_auto_ocr, None, self.a_preprocess, None,
                   self.a_restore):
@@ -352,6 +398,7 @@ class MainWindow(QMainWindow):
         self._update_title()
         self._update_actions()
         self._update_status()
+        self._refresh_annot_list()
 
     def _update_title(self):
         name = os.path.basename(self.project_path) if self.project_path else "未命名工作区"
@@ -441,13 +488,24 @@ class MainWindow(QMainWindow):
         if key in ("text", "addtext"):
             self._ensure_fonts()
         self.viewer.set_tool(key)
-        self.tool_actions[key].setChecked(True)
-        if key in ("text", "addtext"):
+        act = self.tool_actions.get(key)
+        if act is not None:
+            act.setChecked(True)
+        else:
+            for a in self.tool_actions.values():
+                a.setChecked(False)
+        self.annot_panel.set_tool_checked(key)
+        if key.startswith("a_"):
+            self.annot_panel.apply_tool_default(key)
+        if key.startswith("a_"):
             self.right_dock.show()
-            self.right_tabs.setCurrentWidget(self.text_panel)
+            self._show_tab(self.annot_panel)
+        elif key in ("text", "addtext"):
+            self.right_dock.show()
+            self._show_tab(self.text_panel)
         elif key != "hand":
             self.right_dock.show()
-            self.right_tabs.setCurrentWidget(self.region_panel)
+            self._show_tab(self.region_panel)
         self.viewer.setFocus()
 
     def set_thumb_size(self, name):
@@ -1116,7 +1174,7 @@ class MainWindow(QMainWindow):
     # ================================================================ 搜索 / 替换
     def show_search(self, replace=False):
         self.right_dock.show()
-        self.right_tabs.setCurrentWidget(self.search_panel)
+        self._show_tab(self.search_panel)
         self.search_panel.focus_input(replace)
 
     def _search_items(self, scope):
@@ -1378,6 +1436,197 @@ class MainWindow(QMainWindow):
             self._style_cache[key] = st
         return self._style_cache[key]
 
+    # ================================================================ 批注
+    def _setup_annots(self):
+        self.annots = AnnotService(self.store, self.ws, self.texts)
+        self._stamp_cache: dict = {}
+        v = self.viewer
+        v.annot_list = self.annots.annots
+        v.annotMarkup.connect(self._on_annot_markup)
+        v.annotNoteRequested.connect(self._on_annot_note)
+        v.annotFreeTextRequested.connect(self._on_annot_freetext)
+        v.annotShape.connect(self._on_annot_shape)
+        v.annotInk.connect(self._on_annot_ink)
+        v.annotStampRequested.connect(self._on_annot_stamp)
+        v.annotSelected.connect(self._on_annot_selected)
+        v.annotMoved.connect(self._on_annot_moved)
+        v.annotDeleteRequested.connect(self._on_annot_delete)
+        v.annotEditRequested.connect(self._on_annot_edit)
+
+    def _annot_op(self, uid, fn, *args, **kw):
+        if not self._ensure_editable(uid):
+            return None
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                return fn(uid, *args, **kw)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "批注操作失败", f"{type(e).__name__}: {e}")
+            return None
+
+    def _find_annot(self, uid, aid):
+        ref = self.ws.by_uid(uid)
+        if ref is None:
+            return None
+        return next((a for a in self.annots.annots(ref) if a.id == aid), None)
+
+    def _on_annot_markup(self, uid, kind, quads, text):
+        self._annot_op(uid, self.annots.add_markup, kind, quads, self.annot_panel.style(), text)
+
+    def _on_annot_note(self, uid, pt):
+        text, ok = QInputDialog.getMultiLineText(self, "便签", "便签内容：")
+        if ok:
+            self._annot_op(uid, self.annots.add_note, pt, text, self.annot_panel.style())
+
+    def _on_annot_freetext(self, uid, rect):
+        text, ok = QInputDialog.getMultiLineText(self, "文本框", "文本框内容：")
+        if ok and text.strip():
+            self._annot_op(uid, self.annots.add_freetext, rect, text, self.annot_panel.style())
+
+    def _on_annot_shape(self, uid, kind, pts):
+        self._annot_op(uid, self.annots.add_shape, kind, pts, self.annot_panel.style())
+
+    def _on_annot_ink(self, uid, strokes, pressure):
+        st = self.annot_panel.style()
+        if pressure >= 0:                       # 数位板：按平均压感调整线宽
+            st.width = max(0.3, st.width * (0.4 + 1.2 * pressure))
+        self._annot_op(uid, self.annots.add_ink, strokes, st)
+
+    def _stamp_image(self) -> tuple[bytes, str] | None:
+        p = self.annot_panel
+        key = p.stamp.currentData()
+        if key == "__image__":
+            if not p.stamp_image or not os.path.exists(p.stamp_image):
+                QMessageBox.information(self, "图章", "请先在「图章」中选择一张图片。")
+                return None
+            with open(p.stamp_image, "rb") as f:
+                return f.read(), os.path.splitext(os.path.basename(p.stamp_image))[0]
+        if key not in self._stamp_cache:
+            self._ensure_fonts()
+            e = self.fonts.find("SimHei") or self.fonts.find(self.fonts.default_cjk)
+            self._stamp_cache[key] = A.make_stamp_png(key, A.PRESET_STAMPS[key], e.path if e else None)
+        return self._stamp_cache[key], key
+
+    def _on_annot_stamp(self, uid, pt):
+        img = self._stamp_image()
+        if img is None:
+            return
+        data, name = img
+        try:
+            w, h = A.image_size(data)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "图章", f"无法读取图片：{e}")
+            return
+        rect = A.stamp_rect_at(pt, w, h, self.annot_panel.stamp_width.value())
+        self._annot_op(uid, self.annots.add_stamp, rect, data, self.annot_panel.style(), name)
+
+    def _on_annot_selected(self, uid, aid):
+        info = self._find_annot(uid, aid) if aid else None
+        i = self.ws.index_of(uid)
+        self.annot_panel.show_selected(info, i + 1 if info else None)
+
+    def _on_annot_moved(self, uid, aid, dx, dy):
+        info = self._find_annot(uid, aid)
+        if info is not None and info.type in ("Highlight", "Underline", "StrikeOut", "Squiggly"):
+            self.statusBar().showMessage("文字标记批注随文字位置固定，不能移动", 4000)
+            return
+        self._annot_op(uid, self.annots.move, aid, dx, dy)
+
+    def _on_annot_delete(self, uid, aid):
+        if self._annot_op(uid, self.annots.delete, aid):
+            self.viewer.select_annot(uid, None)
+            self.annot_panel.show_selected(None)
+            self.statusBar().showMessage("已删除批注（可撤销）", 3000)
+
+    def _on_annot_edit(self, uid, aid):
+        info = self._find_annot(uid, aid)
+        if info is None:
+            return
+        text, ok = QInputDialog.getMultiLineText(self, "修改批注", f"{info.label}的内容：", info.content)
+        if ok:
+            self._annot_op(uid, self.annots.update, aid, content=text)
+            self._on_annot_selected(uid, aid)
+
+    def _apply_annot_style(self):
+        sel = self.viewer.sel_annot
+        if not sel:
+            QMessageBox.information(self, "批注", "请先用「选择批注」工具单击一个批注。")
+            return
+        uid, aid = sel
+        info = self._find_annot(uid, aid)
+        if info is None:
+            return
+        st = self.annot_panel.style()
+        kw = dict(color=st.color, opacity=st.opacity, width=st.width,
+                  content=self.annot_panel.content.toPlainText())
+        if info.type in ("Square", "Circle", "Polygon", "FreeText"):
+            kw["fill"] = st.fill
+        if info.type == "FreeText":
+            kw["fontsize"] = st.fontsize
+        self._annot_op(uid, self.annots.update, aid, **kw)
+        self._on_annot_selected(uid, aid)
+
+    def _delete_selected_annot(self):
+        if self.viewer.sel_annot:
+            self._on_annot_delete(*self.viewer.sel_annot)
+
+    def _annot_rows(self):
+        rows = self.annots.all_annots()
+        only_cur, author, typ = self.annot_panel.filters()
+        cur = self.viewer.current
+        out = [(i, r, a) for i, r, a in rows
+               if (not only_cur or i == cur) and (author is None or (a.author or "（无）") == author)
+               and (typ is None or a.label == typ)]
+        authors = sorted({a.author or "（无）" for _i, _r, a in rows})
+        types = sorted({a.label for _i, _r, a in rows})
+        return out, authors, types
+
+    def _refresh_annot_list(self, *_):
+        if not self.right_dock.isVisible() or self._current_panel() is not self.annot_panel:
+            return
+        rows, authors, types = self._annot_rows()
+        self.annot_panel.set_rows(rows, authors, types)
+
+    def _jump_annot(self, uid, aid):
+        i = self.ws.index_of(uid)
+        info = self._find_annot(uid, aid)
+        if i < 0 or info is None:
+            return
+        self.set_tool("a_annot")
+        self.viewer.goto(i, info.rect)
+        self.viewer.select_annot(uid, aid)
+        self._on_annot_selected(uid, aid)
+
+    def _export_annot_summary(self):
+        rows, _a, _t = self._annot_rows()
+        if not rows:
+            QMessageBox.information(self, "批注摘要", "没有批注。")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "导出批注摘要", os.path.join(self._default_dir(), "批注摘要.txt"),
+                                              "文本文件 (*.txt)")
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8-sig") as f:
+            f.write(self.annots.summary(rows))
+        show_export_done(self, [path], [], os.path.dirname(path))
+
+    def _redact_regions(self, uid, rids):
+        if uid < 0 or not rids:
+            QMessageBox.information(self, "涂黑", "请先在页面上画出要涂黑的选区（矩形 / 多边形 / 手绘）。")
+            return
+        r = QMessageBox.question(self, "涂黑", f"将彻底删除 {len(rids)} 个选区内的文字、图片像素与图形，并以黑块覆盖。\n"
+                                 "在本程序中可撤销，但导出后无法恢复。继续吗？")
+        if r != QMessageBox.Yes:
+            return
+        import pymupdf as fitz
+        rects = [fitz.Rect(*self.regions.find(uid, rid).bbox()) for rid in rids if self.regions.find(uid, rid)]
+        if self._annot_op(uid, self.annots.redact, rects):
+            for rid in rids:
+                self.regions.remove(uid, rid)
+            self.statusBar().showMessage("已涂黑。导出时建议勾选「清理隐私信息」", 6000)
+
     # ================================================================ 导出
     def _default_dir(self):
         for s in self.store.sources.values():
@@ -1392,7 +1641,8 @@ class MainWindow(QMainWindow):
         sel_rows = self.thumbs.selected_rows()
         first = next((s for s in self.store.sources.values() if s.path), None)
         default_name = (first.name + "_合并") if first else "导出"
-        dlg = ExportDialog(self, bool(sel_rows), n, len(sel_rows), self._default_dir(), default_name)
+        dlg = ExportDialog(self, bool(sel_rows), n, len(sel_rows), self._default_dir(), default_name,
+                           self.annots.has_redactions(self.ws.refs))
         if not dlg.exec():
             return
         rows = sel_rows if dlg.use_selection() else list(range(n))
@@ -1438,6 +1688,8 @@ class MainWindow(QMainWindow):
         self.viewer.close_editor(False)
         self.viewer.sel_block = None
         self.texts.clear_cache()
+        self.annots.clear_cache()
+        self.viewer.sel_annot = None
         self.ocr.cancel()
         self._style_cache.clear()
         self._hits = []
