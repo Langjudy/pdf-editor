@@ -136,3 +136,11 @@ OCR 不改变页面外观，因此不进入撤销历史：识别结果会同步�
 ## 后续阶段
 
 - 阶段四：批注、图章、涂黑、加密完善
+
+## 许可证
+
+Copyright (C) 2026 Langjudy
+
+本项目以 [GNU Affero 通用公共许可证 v3.0（AGPL-3.0）](LICENSE) 发布。
+
+本项目依赖的 PyMuPDF / MuPDF 采用 AGPL-3.0（或 Artifex 商业授权）。依据 AGPL：分发本软件或以网络服务形式对外提供时，须按同一许可证公开完整源码；若需闭源分发，请向 Artifex 购买 PyMuPDF 商业授权。
