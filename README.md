@@ -2,6 +2,17 @@
 
 按《PDF编辑软件技术要求说明书》开发的桌面端 PDF 工具。Python + PySide6 + PyMuPDF，全部离线、纯 CPU 运行。
 
+## 安装
+
+需要 Windows 10/11 与 conda（或任意 Python 3.11）。在项目目录内创建环境并安装依赖：
+
+```
+conda create -p ./venv python=3.11 -y
+venv\python.exe -m pip install -r requirements.txt
+```
+
+文字编辑使用系统自带字体（宋体、黑体等，位于 `C:\Windows\Fonts`）。
+
 ## 启动
 
 双击 `run.bat`，或：
@@ -15,6 +26,8 @@ venv\python.exe -m pdfedit [要打开的文件...]
 ```
 venv\python.exe -m pytest tests
 ```
+
+测试样本由测试代码自动生成；少数用例需要样例文件《PDF编辑软件技术要求说明书.pdf》（未随仓库提供），缺少时自动跳过。
 
 ## 目录结构（对应说明书第 3 节四层架构）
 
