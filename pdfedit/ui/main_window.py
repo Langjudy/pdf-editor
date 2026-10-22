@@ -1773,9 +1773,14 @@ class MainWindow(QMainWindow):
                     self._update_title()
 
     def _about(self):
-        QMessageBox.about(self, "关于", f"<b>{APP_NAME}</b><br>阶段一：页面管理、合并拆分导出、区域选取导出。<br>"
+        from .. import __version__
+        QMessageBox.about(self, "关于", f"<b>{APP_NAME}</b> v{__version__}<br><br>"
+                                      "页面管理、合并拆分导出、区域选取导出；矢量文字编辑；<br>"
+                                      "扫描件 OCR 与覆盖式编辑；批注、图章与涂黑。<br>"
                                       "全部处理在本地完成，不上传任何文件。<br><br>"
-                                      "基于 PySide6（LGPL）与 PyMuPDF（AGPL，仅限内部使用）。")
+                                      "本软件以 AGPL-3.0 许可证发布：<br>"
+                                      "https://github.com/Langjudy/pdf-editor<br>"
+                                      "基于 PySide6（LGPL）、PyMuPDF（AGPL）、RapidOCR / OpenCV（Apache 2.0）。")
 
     def closeEvent(self, e):
         if not self._confirm_discard():

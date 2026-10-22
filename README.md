@@ -4,7 +4,13 @@
 
 按《PDF编辑软件技术要求说明书》开发的桌面端 PDF 工具。Python + PySide6 + PyMuPDF，全部离线、纯 CPU 运行。
 
-## 安装
+## 下载安装（Windows）
+
+到 [Releases](https://github.com/Langjudy/pdf-editor/releases) 下载 `PdfEditor-版本-Setup.exe`，双击安装即可（无需 Python 环境）。
+安装时可选择“仅为我安装”（无需管理员权限）或“为所有用户安装”。安装包未做代码签名，Windows 可能提示“未知发布者”，
+选择「更多信息 → 仍要运行」即可。
+
+## 从源码运行
 
 主要支持 Windows 10/11；代码已适配 macOS / Linux（字体目录、数据目录、文件管理器），但未在这两个平台实测。
 需要 conda（或任意 Python 3.11）。在项目目录内创建环境并安装依赖：
@@ -31,6 +37,16 @@ venv\python.exe -m pytest tests
 ```
 
 测试样本由测试代码自动生成；少数用例需要样例文件《PDF编辑软件技术要求说明书.pdf》（未随仓库提供），缺少时自动跳过。
+
+## 打包安装程序
+
+需要项目内 venv（`pip install -r requirements.txt pyinstaller`）与 [Inno Setup 6](https://jrsoftware.org/isinfo.php)，然后运行：
+
+```
+packaging\build.bat
+```
+
+依次执行：PyInstaller 打包 → 打包后自检（`PdfEditor.exe --selftest`）→ 生成 `packaging\Output\PdfEditor-版本-Setup.exe`。
 
 ## 目录结构（对应说明书第 3 节四层架构）
 
