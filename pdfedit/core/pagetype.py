@@ -77,11 +77,11 @@ def classify_stats(s: dict) -> str:
     if not hits:
         if ratio >= t["mixed_image"]:
             return SCAN
-        if paths > t["outline_paths"]:
-            return OUTLINE
         if n == 0 and paths == 0:
             return BLANK
-        return TEXT   # 少量文字/简单图形的矢量页
+        if paths > t["outline_paths"] or n == 0:
+            return OUTLINE    # 没有可提取文字的图形页（含文字转曲线）：按扫描页方式编辑
+        return TEXT           # 少量真实文字 + 简单图形的矢量页
     if MIXED in hits or len(set(hits)) > 1:
         return MIXED
     return hits[0]

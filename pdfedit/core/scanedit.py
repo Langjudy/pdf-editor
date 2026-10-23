@@ -17,8 +17,8 @@ import pymupdf as fitz
 from .engine import ENGINE_LOCK
 from .fonts import FontManager, ResolvedFont
 from .ocr import OcrLine, remove_text_layer, write_text_layer
-from .scan import (PageImage, composite_rgba, erase_text, line_strokes, load_page_image,
-                   save_page_image)
+from .scan import (PageImage, composite_rgba, encode_image, erase_text, line_strokes, load_page_image,
+                   render_region, save_page_image)
 from .textedit import LineOut, TBlock, TextStyle, write_overlay
 
 # 字体风格候选：显示名 → 系统字体族名
@@ -214,9 +214,6 @@ def scan_edit_block(page: fitz.Page, block: TBlock, new_text: str, fm: FontManag
             remove_text_layer(page, fitz.Rect(block.bbox) + (-1, -1, 1, 1))
             write_text_layer(page, _proof_lines(old, new_lines))
             return ScanEditResult(None, [])
-        if pi is None:
-            raise ValueError("该页没有可编辑的扫描底图（扫描图片需覆盖页面大部分区域）")
-        arr = pi.arr
         moved = abs(offset[0]) > 0.01 or abs(offset[1]) > 0.01
         same_count = len(new_lines) == len(old)
         todo = []          # (旧行 or None, 新文字, 序号)
@@ -226,6 +223,10 @@ def scan_edit_block(page: fitz.Page, block: TBlock, new_text: str, fm: FontManag
                     todo.append((ln, t, k))
         else:
             todo = [(ln, None, k) for k, ln in enumerate(old)]
+        if pi is None:
+            # 没有整页底图（扫描图像切块存放、CAD 曲线文字等）：删矢量 + 渲染擦除补丁
+            return _patch_edit(page, old, new_lines, todo, same_count, fm, opts, offset)
+        arr = pi.arr
         # 1. 先估算样式（擦除前），再擦除
         styles = {}
         methods = []
@@ -276,6 +277,114 @@ def scan_edit_block(page: fitz.Page, block: TBlock, new_text: str, fm: FontManag
             page.set_rotation(rot)
 
 
+def _remove_vector_glyphs(page: fitz.Page, rect: fitz.Rect):
+    """删除完全落在文字行框内的矢量线条（CAD 用线条画出的“曲线文字”）与该处的文字。
+
+    只删“被框完全覆盖”的路径：穿过文字附近的尺寸线、边框等较长的线条不受影响。
+    """
+    with ENGINE_LOCK:
+        page.add_redact_annot(rect, fill=False)
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE,
+                              graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
+                              text=fitz.PDF_REDACT_TEXT_REMOVE)
+
+
+def _insert_patch(page: fitz.Page, pi: PageImage, arr: np.ndarray, box: tuple):
+    """把渲染图中 box（像素）这一块作为图片补丁贴回页面原位。"""
+    x0, y0, x1, y1 = box
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return
+    crop = np.ascontiguousarray(arr[y0:y1, x0:x1])
+    a = pi.px_to_page(x0, y0)
+    b = pi.px_to_page(x1, y1)
+    with ENGINE_LOCK:
+        page.insert_image(fitz.Rect(a, b), stream=encode_image(crop, prefer_jpeg=_is_photo(crop)))
+
+
+def _is_photo(crop: np.ndarray) -> bool:
+    """颜色丰富（扫描件、照片）用 JPEG，近似纯色的矢量页底色用 PNG。"""
+    small = crop[::4, ::4].reshape(-1, crop.shape[2] if crop.ndim == 3 else 1)
+    return len(np.unique(small // 8, axis=0)) > 64
+
+
+def _patch_edit(page: fitz.Page, old, new_lines, todo, same_count, fm: FontManager,
+                opts: ScanEditOptions, offset) -> ScanEditResult:
+    """没有整页底图时的覆盖式编辑。
+
+    1. 在渲染图上估算原文字样式；
+    2. 删除完全落在行框内的矢量线条（曲线文字）与 OCR 文字层；
+    3. 重新渲染该区域，若仍有字迹残留（字在切块图片里），用背景擦除算法处理后作为图片补丁贴回；
+    4. 在原位写入新文字（矢量；或“渲染进图片”时画进补丁）。
+    """
+    if not todo:
+        return ScanEditResult(None, [])
+    area = fitz.Rect(todo[0][0].bbox)
+    for ln, _t, _k in todo:
+        area |= fitz.Rect(ln.bbox)
+    h = max(ln.bbox[3] - ln.bbox[1] for ln, _t, _k in todo)
+    area = area + (-2 * h, -2 * h, 2 * h, 2 * h)
+    before = render_region(page, area)
+    styles = {}
+    for ln, _t, k in todo:
+        st = estimate_style(before, fitz.Rect(ln.bbox), ln.text, fm)
+        styles[k] = st or ScanStyle("SimSun", "宋体", ln.size, (0, 0, 0), ln.origin)
+    for ln, _t, _k in todo:
+        r = fitz.Rect(ln.bbox) + (-1, -1, 1, 1)
+        remove_text_layer(page, r)
+        _remove_vector_glyphs(page, r)
+    after = render_region(page, area)
+    arr = after.arr
+    methods = []
+    for ln, _t, _k in todo:
+        box = after.page_to_px(fitz.Rect(ln.bbox))
+        new, info = erase_text(arr, box, after.dpi)
+        diff = np.any(new != arr, axis=2) if new.ndim == 3 else new != arr
+        if diff.sum() > 20:                          # 仍有字迹（图片中的字）：贴擦除补丁
+            ys, xs = np.nonzero(diff)
+            pad = 2
+            pbox = (max(0, xs.min() - pad), max(0, ys.min() - pad),
+                    min(arr.shape[1], xs.max() + 1 + pad), min(arr.shape[0], ys.max() + 1 + pad))
+            _insert_patch(page, after, new, pbox)
+            methods.append(info.method)
+        else:
+            methods.append("vector")
+        arr = new
+    # 写入新文字
+    writes = []
+    if same_count:
+        for ln, t, k in todo:
+            if t and t.strip():
+                st = styles[k]
+                writes.append((t, (st.origin[0] + offset[0], st.origin[1] + offset[1]), st))
+    elif new_lines:
+        st0 = styles.get(0) or next(iter(styles.values()))
+        pitch = _pitch(old, st0.size)
+        for k, t in enumerate(new_lines):
+            if t.strip():
+                writes.append((t, (st0.origin[0] + offset[0], st0.origin[1] + offset[1] + k * pitch),
+                               styles.get(k, st0)))
+    font_name = ""
+    for t, origin, st in writes:
+        family = opts.family or st.family
+        size = opts.size or st.size
+        color = opts.color or st.color
+        font, font_name = _font(fm, family)
+        if opts.mode == "image":
+            w = font.text_length(t, fontsize=size)
+            tr = fitz.Rect(origin[0] - 2, origin[1] - size * 1.1, origin[0] + w + 2, origin[1] + size * 0.4)
+            reg = render_region(page, tr)
+            rgba, (ox, oy) = render_text_rgba(t, font, size, color, reg.dpi / 72.0)
+            q = fitz.Point(*origin) * ~reg.matrix
+            img = composite_rgba(reg.arr, rgba, int(round(q.x - ox)), int(round(q.y - oy)), opts.texture)
+            _insert_patch(page, reg, img, (0, 0, img.shape[1], img.shape[0]))
+            write_text_layer(page, [OcrLine(t, [(tr.x0, tr.y0), (tr.x1, tr.y0), (tr.x1, tr.y1), (tr.x0, tr.y1)], 1.0)])
+        else:
+            style = TextStyle(font=None, size=size, color=color)
+            write_overlay(page, [LineOut(t, origin, (1.0, 0.0))], ResolvedFont(font, font_name, False, False), style)
+    first = styles.get(0) or next(iter(styles.values()))
+    return ScanEditResult(first, methods, font_name)
+
+
 def _pitch(lines, size: float) -> float:
     if len(lines) > 1:
         gaps = sorted(b.origin[1] - a.origin[1] for a, b in zip(lines, lines[1:]))
@@ -305,7 +414,13 @@ def erase_area(page: fitz.Page, rect: fitz.Rect) -> str:
     try:
         pi = load_page_image(page)
         if pi is None:
-            raise ValueError("该页没有可编辑的扫描底图")
+            # 没有整页底图（图像切块存放等）：渲染该区域擦除后作为补丁贴回
+            r = fitz.Rect(rect)
+            reg = render_region(page, r + (-r.height, -r.height, r.height, r.height))
+            arr, info = erase_text(reg.arr, reg.page_to_px(r), reg.dpi, everything=True)
+            _insert_patch(page, reg, arr, (0, 0, arr.shape[1], arr.shape[0]))
+            remove_text_layer(page, rect)
+            return info.method
         arr, info = erase_text(pi.arr, pi.page_to_px(rect), pi.dpi, everything=True)
         save_page_image(page, pi, arr)
         remove_text_layer(page, rect)

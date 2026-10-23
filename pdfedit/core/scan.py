@@ -85,6 +85,23 @@ def load_page_image(page: fitz.Page) -> PageImage | None:
         return PageImage(xref, arr, mat, ext)
 
 
+def render_region(page: fitz.Page, rect: fitz.Rect, dpi: float = 300) -> PageImage:
+    """把页面的一块区域渲染成图像（调用方需已把页面旋转临时设为 0）。
+
+    用于没有整页底图的页面（扫描图像被切块存放、CAD 曲线文字等）：在渲染图上估算样式、擦除，
+    再以图片补丁的形式贴回。xref 为 -1 表示不是文档中的图片。
+    """
+    r = fitz.Rect(rect) & page.rect
+    s = dpi / 72.0
+    with ENGINE_LOCK:
+        pix = page.get_pixmap(matrix=fitz.Matrix(s, s), clip=r, alpha=False)
+    arr = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n).copy()
+    if pix.n == 1:
+        arr = arr[:, :, 0]
+    mat = fitz.Matrix(1 / s, 0, 0, 1 / s, pix.x / s, pix.y / s)    # 像素 → 页面坐标
+    return PageImage(-1, arr, mat, "png")
+
+
 def encode_image(arr: np.ndarray, prefer_jpeg: bool) -> bytes:
     """二值 / 灰度图存 PNG（无损且小），彩色扫描存高质量 JPEG。"""
     is_bilevel = arr.ndim == 2 and np.isin(arr, (0, 255)).all()

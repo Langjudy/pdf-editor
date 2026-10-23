@@ -2,7 +2,7 @@
 ; 先用 PyInstaller 生成 packaging\dist\PdfEditor，再编译：ISCC packaging\installer.iss
 
 #define AppName "PDF 编辑器"
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.1"
 #define AppExe "PdfEditor.exe"
 #define AppURL "https://github.com/Langjudy/pdf-editor"
 

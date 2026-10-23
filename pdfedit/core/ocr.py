@@ -124,7 +124,7 @@ def _char_size(q: fitz.Quad) -> float:
 
 
 def write_text_layer(page: fitz.Page, lines: list[OcrLine]):
-    """在页面上写入不可见文字层（逐字定位）。"""
+    """在页面上写入不可见文字层（每行按识别框定位并缩放到框宽）。"""
     if not lines:
         return
     with ENGINE_LOCK:
@@ -136,27 +136,36 @@ def write_text_layer(page: fitz.Page, lines: list[OcrLine]):
         tp = tmp.new_page(width=W, height=H)
         font = _layer_font()
         for ln in lines:
-            tw = fitz.TextWriter(tp.rect)
-            ang = ln.angle
-            if ln.chars:
-                for ch, q in ln.chars:
-                    if ch.isspace():
-                        continue
-                    size = _char_size(q)
-                    # 每个字放在字符框左下角（基线略高于框底）
-                    base = q.ll + (q.ul - q.ll) * 0.12
-                    tw.append(base, ch, font=font, fontsize=size)
-                    # 宽度按字符框横向缩放：通过 morph 实现太贵，这里依靠逐字定位已足够准确
+            # 整行写入，再水平缩放到识别框宽度：字母、数字之间连续，提取时不会被拆散
+            # （逐字放置时英文字母比字符框窄，空隙会让单词被拆成一个个字母）
+            chars = [(c, q) for c, q in ln.chars if not c.isspace()] if ln.chars else []
+            text = ln.text.strip()
+            if not text:
+                continue
+            if chars:
+                hs = sorted(abs(q.ll - q.ul) for _c, q in chars)
+                size = max(1.0, hs[len(hs) // 2] * 0.8)
+                left = chars[0][1]
+                start, end = left.ll, chars[-1][1].lr
+                height = abs(left.ll - left.ul)
+                up = (left.ul - left.ll) * (1.0 / max(height, 1e-6))
             else:
                 q = _quad(ln.quad)
                 size = _char_size(q)
-                tw.append(q.ll + (q.ul - q.ll) * 0.12, ln.text, font=font, fontsize=size)
-            morph = None
-            # 逐字放置时位置已随倾斜排布，不再整体旋转；整行放置时才按行角度旋转
-            if not ln.chars and abs(ang) > 0.5:
-                o = fitz.Point(*ln.quad[3])
-                morph = (o, fitz.Matrix(-ang))
-            tw.write_text(tp, render_mode=3, morph=morph)
+                start, end = q.ll, q.lr
+                height = abs(q.ll - q.ul)
+                up = (q.ul - q.ll) * (1.0 / max(height, 1e-6))
+            origin = start + up * (height * 0.12)          # 基线略高于框底
+            natural = font.text_length(text, fontsize=size)
+            target = abs(end - start)
+            sx = min(5.0, max(0.2, target / natural)) if natural > 0 else 1.0
+            ang = ln.angle
+            m = fitz.Matrix(sx, 0, 0, 1, 0, 0)
+            if abs(ang) > 0.5:
+                m = m * fitz.Matrix(-ang)                  # morph 按 PDF 坐标（y 轴向上）旋转
+            tw = fitz.TextWriter(tp.rect)
+            tw.append(origin, text, font=font, fontsize=size)
+            tw.write_text(tp, render_mode=3, morph=(origin, m))
         tmp.subset_fonts()
         tmp = fitz.open("pdf", tmp.tobytes(garbage=3, deflate=True))
         page.show_pdf_page(page.rect, tmp, 0)

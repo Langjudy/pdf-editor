@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QPlainTextEdit, QToolTip
 from ..core import pagetype
 
 TEXT_TOOLS = ("text", "addtext")
-OUTLINE_TIP = "此处为图形，非文字，无法直接编辑\n（可在阶段三使用「按扫描页方式编辑」）"
+OUTLINE_TIP = "此处文字是线条画的（曲线），不能直接编辑：单击可 OCR 识别后按扫描页方式修改"
 
 
 class InlineEditor(QPlainTextEdit):

@@ -1113,7 +1113,7 @@ class MainWindow(QMainWindow):
     def _scan_result(self, res):
         if res is None:
             return
-        how = {"fill": "背景色填充", "inpaint": "图像修复"}
+        how = {"fill": "背景色填充", "inpaint": "图像修复", "vector": "删除矢量线条"}
         methods = "、".join(sorted({how.get(m, m) for m in res.erase_methods})) or "—"
         msg = f"已擦除原字（{methods}）并重写"
         if res.font_name:
@@ -1125,8 +1125,9 @@ class MainWindow(QMainWindow):
     def _on_outline_clicked(self, uid):
         ref = self.ws.by_uid(uid)
         if ref is not None and self.texts.is_scan(ref) and not self.texts.has_ocr(ref):
-            r = QMessageBox.question(self, "扫描页", "该扫描页还没有识别文字，现在进行 OCR 识别吗？（约 3~5 秒）\n"
-                                     "识别后即可单击选中文字行进行修改。")
+            kind = "曲线页（文字是线条画的）" if self.texts.page_type(ref) == pagetype.OUTLINE else "扫描页"
+            r = QMessageBox.question(self, "按扫描页方式编辑", f"该{kind}还没有识别文字，现在进行 OCR 识别吗？"
+                                     "（约 3~5 秒）\n识别后即可单击选中文字行进行修改。")
             if r == QMessageBox.Yes and self._ensure_editable(uid):
                 self._ocr_now(ref)
             return

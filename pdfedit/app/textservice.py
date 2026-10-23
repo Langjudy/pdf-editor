@@ -105,12 +105,15 @@ class TextService:
         return self.store.get(ref.src).page_type(ref.pno)
 
     def is_scan(self, ref: PageRef) -> bool:
-        """扫描页（含从扫描页裁出的区域页）：文字修改走“擦除 + 原位重写”。"""
+        """按扫描页方式编辑的页面：扫描页、曲线页（CAD 线条文字），含从它们裁出的区域页。
+
+        这类页面先 OCR 识别文字，修改时“擦除（删除线条或擦除像素）+ 原位重写”（技术要求 7.4、8.3）。
+        """
         t = self.page_type(ref)
         if t == pagetype.REGION:
             sid, pno = origin_source(self.store, ref)
             t = self.store.get(sid).page_type(pno) if sid in self.store.sources else None
-        return t == pagetype.SCAN
+        return t in (pagetype.SCAN, pagetype.OUTLINE)
 
     def has_ocr(self, ref: PageRef) -> bool:
         return self.store.has_ocr(ref.src, ref.pno) or (self.is_scan(ref) and bool(self.blocks(ref)))
